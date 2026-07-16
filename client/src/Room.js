@@ -26,6 +26,9 @@ export default function Room({ roomId, peerId, onLeave }) {
     const [activeUsers, setActiveUsers] = useState([]);
     const [isSendingFile, setIsSendingFile] = useState(false);
     const [fileProgress, setFileProgress] = useState(null);
+    
+    // Tracks when the WebRTC pipe is actually open
+    const [isConnected, setIsConnected] = useState(false); 
 
     const peersRef = useRef({});
     const fileInputRef = useRef(null);
@@ -108,9 +111,9 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handlePeerData = (data, socketId) => {
         try {
-            // FIX: Safely decode binary data package back into a plain text string
+            // Safely decode binary packages back into text strings
             let decodedString;
-            if (data instanceof Uint8Array || Buffer.isBuffer(data) || data.buffer) {
+            if (data instanceof Uint8Array || data.buffer) {
                 decodedString = new TextDecoder("utf-8").decode(data);
             } else {
                 decodedString = data;
@@ -160,7 +163,6 @@ export default function Room({ roomId, peerId, onLeave }) {
                 }
             }
         } catch (err) {
-            // Log errors explicitly while debugging
             console.error("Data parsing error:", err);
         }
     };
@@ -172,9 +174,9 @@ export default function Room({ roomId, peerId, onLeave }) {
                 true,
                 null,
                 (signal) => socket.emit('signal', { toSocketId: newSocketId, signal }),
-                () => { },
+                () => setIsConnected(true), // Unlocks input when connection opens
                 (data) => handlePeerData(data, newSocketId),
-                () => { }
+                () => setIsConnected(false)
             );
             peersRef.current[newSocketId] = peer;
             setActiveUsers(Object.keys(peersRef.current));
@@ -191,9 +193,9 @@ export default function Room({ roomId, peerId, onLeave }) {
                     false,
                     null,
                     (signal) => socket.emit('signal', { toSocketId: existingSocketId, signal }),
-                    () => { },
+                    () => setIsConnected(true), // Unlocks input when connection opens
                     (data) => handlePeerData(data, existingSocketId),
-                    () => { }
+                    () => setIsConnected(false)
                 );
                 peersRef.current[existingSocketId] = peer;
             });
@@ -209,6 +211,7 @@ export default function Room({ roomId, peerId, onLeave }) {
             const peer = peersRef.current[socketId];
             if (peer) { peer.destroy(); delete peersRef.current[socketId]; }
             setActiveUsers(Object.keys(peersRef.current));
+            setIsConnected(Object.keys(peersRef.current).length > 0);
             setMessages(prev => [...prev, {
                 type: 'system',
                 text: 'A peer disconnected',
@@ -232,7 +235,7 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handleSend = (e) => {
         e.preventDefault();
-        if (input.trim()) {
+        if (input.trim() && isConnected) {
             sendMessage(input.trim());
             setInput('');
         }
@@ -240,7 +243,7 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handleFileChange = (e) => {
         const file = e.target.files[0];
-        if (file) {
+        if (file && isConnected) {
             sendFile(file);
             e.target.value = '';
         }
@@ -255,7 +258,6 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     return (
         <div style={roomStyles.container}>
-            {/* Header */}
             <header style={roomStyles.header}>
                 <div style={roomStyles.headerLeft}>
                     <div style={roomStyles.roomBadge}>
@@ -272,7 +274,6 @@ export default function Room({ roomId, peerId, onLeave }) {
                 </button>
             </header>
 
-            {/* Chat */}
             <div style={roomStyles.chatArea} ref={chatAreaRef}>
                 {messages.length === 0 && (
                     <div style={roomStyles.emptyState}>
@@ -349,7 +350,6 @@ export default function Room({ roomId, peerId, onLeave }) {
                     );
                 })}
 
-                {/* File upload progress */}
                 {isSendingFile && (
                     <div style={roomStyles.progressWrap}>
                         <span style={roomStyles.progressLabel}>Uploading…</span>
@@ -363,21 +363,21 @@ export default function Room({ roomId, peerId, onLeave }) {
                 <div ref={messagesEndRef} />
             </div>
 
-            {/* Input */}
             <form onSubmit={handleSend} style={roomStyles.inputForm}>
-                <label style={roomStyles.attachBtn}>
+                <label style={{ ...roomStyles.attachBtn, opacity: isConnected ? 1 : 0.4, pointerEvents: isConnected ? 'auto' : 'none' }}>
                     <span>⊕</span>
-                    <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} />
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} disabled={!isConnected} />
                 </label>
                 <input
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder="Type a message…"
+                    placeholder={isConnected ? "Type a message…" : "Securing direct peer connection..."}
                     style={roomStyles.inputField}
+                    disabled={!isConnected}
                 />
-                <button type="submit" style={roomStyles.sendBtn} disabled={!input.trim()}>
+                <button type="submit" style={{ ...roomStyles.sendBtn, opacity: (input.trim() && isConnected) ? 1 : 0.4 }} disabled={!input.trim() || !isConnected}>
                     <span>▶</span>
                 </button>
             </form>
