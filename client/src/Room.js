@@ -26,7 +26,6 @@ export default function Room({ roomId, peerId, onLeave }) {
     const [activeUsers, setActiveUsers] = useState([]);
     const [isSendingFile, setIsSendingFile] = useState(false);
     const [fileProgress, setFileProgress] = useState(null);
-    const [isConnected, setIsConnected] = useState(false); // Moved up so it's initialized early
 
     const peersRef = useRef({});
     const fileInputRef = useRef(null);
@@ -109,6 +108,7 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handlePeerData = (data, socketId) => {
         try {
+            // FIX: Safely decode binary data package back into a plain text string
             let decodedString;
             if (data instanceof Uint8Array || Buffer.isBuffer(data) || data.buffer) {
                 decodedString = new TextDecoder("utf-8").decode(data);
@@ -160,6 +160,7 @@ export default function Room({ roomId, peerId, onLeave }) {
                 }
             }
         } catch (err) {
+            // Log errors explicitly while debugging
             console.error("Data parsing error:", err);
         }
     };
@@ -171,9 +172,9 @@ export default function Room({ roomId, peerId, onLeave }) {
                 true,
                 null,
                 (signal) => socket.emit('signal', { toSocketId: newSocketId, signal }),
-                () => setIsConnected(true), // FIX: Sets connection true when handshake completes
+                () => { },
                 (data) => handlePeerData(data, newSocketId),
-                () => setIsConnected(false)
+                () => { }
             );
             peersRef.current[newSocketId] = peer;
             setActiveUsers(Object.keys(peersRef.current));
@@ -190,10 +191,9 @@ export default function Room({ roomId, peerId, onLeave }) {
                     false,
                     null,
                     (signal) => socket.emit('signal', { toSocketId: existingSocketId, signal }),
-                    // FIX: Ensures the existing user ALSO flips to connected when handshake completes
-                    () => setIsConnected(true), 
+                    () => { },
                     (data) => handlePeerData(data, existingSocketId),
-                    () => setIsConnected(false)
+                    () => { }
                 );
                 peersRef.current[existingSocketId] = peer;
             });
@@ -209,7 +209,6 @@ export default function Room({ roomId, peerId, onLeave }) {
             const peer = peersRef.current[socketId];
             if (peer) { peer.destroy(); delete peersRef.current[socketId]; }
             setActiveUsers(Object.keys(peersRef.current));
-            setIsConnected(Object.keys(peersRef.current).length > 0);
             setMessages(prev => [...prev, {
                 type: 'system',
                 text: 'A peer disconnected',
@@ -233,7 +232,7 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handleSend = (e) => {
         e.preventDefault();
-        if (input.trim() && isConnected) {
+        if (input.trim()) {
             sendMessage(input.trim());
             setInput('');
         }
@@ -241,7 +240,7 @@ export default function Room({ roomId, peerId, onLeave }) {
 
     const handleFileChange = (e) => {
         const file = e.target.files[0];
-        if (file && isConnected) {
+        if (file) {
             sendFile(file);
             e.target.value = '';
         }
@@ -364,47 +363,27 @@ export default function Room({ roomId, peerId, onLeave }) {
                 <div ref={messagesEndRef} />
             </div>
 
-            {/* Input Form with Handshake Protections */}
+            {/* Input */}
             <form onSubmit={handleSend} style={roomStyles.inputForm}>
-                <label style={{ 
-                    ...roomStyles.attachBtn, 
-                    opacity: isConnected ? 1 : 0.4, 
-                    pointerEvents: isConnected ? 'auto' : 'none' 
-                }}>
+                <label style={roomStyles.attachBtn}>
                     <span>⊕</span>
-                    <input 
-                        type="file" 
-                        ref={fileInputRef} 
-                        onChange={handleFileChange} 
-                        style={{ display: 'none' }} 
-                        disabled={!isConnected} 
-                    />
+                    <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} />
                 </label>
                 <input
                     type="text"
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={isConnected ? "Type a message…" : "Connecting peer to peer pipeline..."}
+                    placeholder="Type a message…"
                     style={roomStyles.inputField}
-                    disabled={!isConnected} // Stops message dropping during connecting states
                 />
-                <button 
-                    type="submit" 
-                    style={{ 
-                        ...roomStyles.sendBtn, 
-                        opacity: (input.trim() && isConnected) ? 1 : 0.4 
-                    }} 
-                    disabled={!input.trim() || !isConnected}
-                >
+                <button type="submit" style={roomStyles.sendBtn} disabled={!input.trim()}>
                     <span>▶</span>
                 </button>
             </form>
         </div>
     );
 }
-
-// ... your exact roomStyles object continues below unchanged ...
 
 const roomStyles = {
     container: {
