@@ -107,63 +107,65 @@ export default function Room({ roomId, peerId, onLeave }) {
     };
 
     const handlePeerData = (data, socketId) => {
-    try {
-      // FIX: Safely decode binary data package back into a plain text string
-      let decodedString;
-      if (data instanceof Uint8Array || Buffer.isBuffer(data) || data.buffer) {
-        decodedString = new TextDecoder("utf-8").decode(data);
-      } else {
-        decodedString = data;
-      }
+        try {
+            // FIX: Safely decode binary data package back into a plain text string
+            let decodedString;
+            if (data instanceof Uint8Array || Buffer.isBuffer(data) || data.buffer) {
+                decodedString = new TextDecoder("utf-8").decode(data);
+            } else {
+                decodedString = data;
+            }
 
-      const msg = JSON.parse(decodedString);
-      
-      if (msg.type === 'text') {
-        setMessages(prev => [...prev, { ...msg, fromSocketId: socketId }]);
-      } else if (msg.type === 'file') {
-        const key = `${msg.fileName}-${msg.from}`;
-        if (!window._fileChunks) window._fileChunks = new Map();
-        if (!window._fileChunks.has(key)) {
-          window._fileChunks.set(key, {
-            chunks: [],
-            total: msg.totalChunks,
-            fileName: msg.fileName,
-            from: msg.from,
-            size: msg.fileSize,
-            timestamp: msg.timestamp
-          });
+            const msg = JSON.parse(decodedString);
+
+            if (msg.type === 'text') {
+                setMessages(prev => [...prev, { ...msg, fromSocketId: socketId }]);
+            } else if (msg.type === 'file') {
+                const key = `${msg.fileName}-${msg.from}`;
+                if (!window._fileChunks) window._fileChunks = new Map();
+                if (!window._fileChunks.has(key)) {
+                    window._fileChunks.set(key, {
+                        chunks: [],
+                        total: msg.totalChunks,
+                        fileName: msg.fileName,
+                        from: msg.from,
+                        size: msg.fileSize,
+                        timestamp: msg.timestamp
+                    });
+                }
+                const entry = window._fileChunks.get(key);
+                entry.chunks[msg.chunkIndex] = new Uint8Array(msg.data);
+
+                if (entry.chunks.length === entry.total && entry.chunks.every(c => c !== undefined)) {
+                    const fullBuffer = new Uint8Array(entry.size);
+                    let pos = 0;
+                    for (const chunk of entry.chunks) {
+                        fullBuffer.set(chunk, pos);
+                        pos += chunk.length;
+                    }
+                    const blob = new Blob([fullBuffer]);
+                    const url = URL.createObjectURL(blob);
+
+                    setMessages(prev => [...prev, {
+                        type: 'file',
+                        fileName: entry.fileName,
+                        fileSize: entry.size,
+                        from: entry.from,
+                        fromSocketId: socketId,
+                        downloadUrl: url,
+                        complete: true,
+                        timestamp: entry.timestamp || Date.now()
+                    }]);
+                    window._fileChunks.delete(key);
+                }
+            }
+        } catch (err) {
+            // Log errors explicitly while debugging
+            console.error("Data parsing error:", err);
         }
-        const entry = window._fileChunks.get(key);
-        entry.chunks[msg.chunkIndex] = new Uint8Array(msg.data);
+    };
 
-        if (entry.chunks.length === entry.total && entry.chunks.every(c => c !== undefined)) {
-          const fullBuffer = new Uint8Array(entry.size);
-          let pos = 0;
-          for (const chunk of entry.chunks) {
-            fullBuffer.set(chunk, pos);
-            pos += chunk.length;
-          }
-          const blob = new Blob([fullBuffer]);
-          const url = URL.createObjectURL(blob);
-
-          setMessages(prev => [...prev, {
-            type: 'file',
-            fileName: entry.fileName,
-            fileSize: entry.size,
-            from: entry.from,
-            fromSocketId: socketId,
-            downloadUrl: url,
-            complete: true,
-            timestamp: entry.timestamp || Date.now()
-          }]);
-          window._fileChunks.delete(key);
-        }
-      }
-    } catch (err) {
-      // Log errors explicitly while debugging
-      console.error("Data parsing error:", err);
-    }
-  };
+    const [isConnected, setIsConnected] = useState(false);
 
     useEffect(() => {
         const onUserJoined = ({ peerId: newPeerId, socketId: newSocketId }) => {
@@ -172,9 +174,10 @@ export default function Room({ roomId, peerId, onLeave }) {
                 true,
                 null,
                 (signal) => socket.emit('signal', { toSocketId: newSocketId, signal }),
-                () => { },
+                // FIX: The direct channel is open for this peer instance!
+                () => setIsConnected(true),
                 (data) => handlePeerData(data, newSocketId),
-                () => { }
+                () => setIsConnected(false)
             );
             peersRef.current[newSocketId] = peer;
             setActiveUsers(Object.keys(peersRef.current));
@@ -191,9 +194,10 @@ export default function Room({ roomId, peerId, onLeave }) {
                     false,
                     null,
                     (signal) => socket.emit('signal', { toSocketId: existingSocketId, signal }),
-                    () => { },
+                    // FIX: The direct channel is open for this peer instance!
+                    () => setIsConnected(true),
                     (data) => handlePeerData(data, existingSocketId),
-                    () => { }
+                    () => setIsConnected(false)
                 );
                 peersRef.current[existingSocketId] = peer;
             });
@@ -209,6 +213,7 @@ export default function Room({ roomId, peerId, onLeave }) {
             const peer = peersRef.current[socketId];
             if (peer) { peer.destroy(); delete peersRef.current[socketId]; }
             setActiveUsers(Object.keys(peersRef.current));
+            setIsConnected(Object.keys(peersRef.current).length > 0);
             setMessages(prev => [...prev, {
                 type: 'system',
                 text: 'A peer disconnected',
