@@ -5,12 +5,6 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
-
-// Add a friendly health check route for the browser view
-app.get('/', (req, res) => {
-  res.send('P2P Nexus Signaling Server is Online and Operational.');
-});
-
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -64,7 +58,7 @@ io.on('connection', (socket) => {
     socket.data.peerId = peerId;
 
     // Notify all other peers in the room about the new peer
-    socket.to(roomId).emit('user-joined', { peerId, strokeId: socket.id });
+    socket.to(roomId).emit('user-joined', { peerId, socketId: socket.id });
 
     // Send the list of existing peers to the new joiner
     const existingPeers = Object.entries(room.peers)
