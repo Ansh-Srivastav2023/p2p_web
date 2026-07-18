@@ -3,7 +3,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { socket } from './socket';
 import { createPeer } from './peer';
 
-const CHUNK_SIZE = 64 * 1024;
+const CHUNK_SIZE = 16 * 1024; // 16KB is the safest maximum baseline size across all platforms/browsers
+const BUFFER_THRESHOLD = 64 * 1024; // 64KB backpressure threshold
 
 export function useRoom(roomId, peerId) {
     const [messages, setMessages] = useState([]);
@@ -13,9 +14,8 @@ export function useRoom(roomId, peerId) {
     const [isConnected, setIsConnected] = useState(false);
 
     const peersRef = useRef({});
-    const fileChunksRef = useRef(new Map()); // store in‑progress file chunks
+    const fileChunksRef = useRef(new Map());
 
-    // ---------- Helpers (data logic) ----------
     const sendMessage = useCallback((text) => {
         const msg = { type: 'text', text, from: peerId, timestamp: Date.now() };
         Object.values(peersRef.current).forEach(peer => {
@@ -24,8 +24,8 @@ export function useRoom(roomId, peerId) {
         setMessages(prev => [...prev, { ...msg, local: true }]);
     }, [peerId]);
 
-    const sendFile = useCallback((file) => {
-        const reader = new FileReader();
+    // Robust file sender with backpressure and rate limiting logic built-in
+    const sendFile = useCallback(async (file) => {
         const fileName = file.name;
         const fileSize = file.size;
         let offset = 0;
@@ -35,54 +35,79 @@ export function useRoom(roomId, peerId) {
         setIsSendingFile(true);
         setFileProgress(0);
 
-        const readChunk = () => {
-            const slice = file.slice(offset, offset + CHUNK_SIZE);
-            reader.readAsArrayBuffer(slice);
+        const readSlice = (start, end) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => resolve(new Uint8Array(e.target.result));
+                reader.onerror = (err) => reject(err);
+                reader.readAsArrayBuffer(file.slice(start, end));
+            });
         };
 
-        reader.onload = (e) => {
-            const chunkData = new Uint8Array(e.target.result);
-            const message = {
-                type: 'file',
-                fileName,
-                fileSize,
-                chunkIndex,
-                totalChunks,
-                data: Array.from(chunkData),
-                from: peerId,
-                timestamp: Date.now()
-            };
-
-            Object.values(peersRef.current).forEach(peer => {
-                try { peer.send(JSON.stringify(message)); } catch (_) { }
-            });
-
-            offset += CHUNK_SIZE;
-            chunkIndex++;
-            const progress = Math.min(100, Math.round((offset / fileSize) * 100));
-            setFileProgress(progress);
-
-            if (offset < fileSize) {
-                readChunk();
-            } else {
-                setIsSendingFile(false);
-                setFileProgress(null);
-                setMessages(prev => [...prev, {
+        try {
+            while (offset < fileSize) {
+                const chunkData = await readSlice(offset, offset + CHUNK_SIZE);
+                const message = {
                     type: 'file',
                     fileName,
                     fileSize,
+                    chunkIndex,
+                    totalChunks,
+                    data: Array.from(chunkData),
                     from: peerId,
-                    local: true,
-                    complete: true,
                     timestamp: Date.now()
-                }]);
-            }
-        };
+                };
 
-        readChunk();
+                const serializedMsg = JSON.stringify(message);
+
+                // Handle backpressure for every peer connection
+                for (const peer of Object.values(peersRef.current)) {
+                    try {
+                        // If simple-peer's underlying data channel buffer is full, wait for it to clear
+                        const channel = peer._channel; 
+                        if (channel && channel.bufferedAmount > BUFFER_THRESHOLD) {
+                            await new Promise((resolve) => {
+                                const checkBuffer = () => {
+                                    if (channel.bufferedAmount <= BUFFER_THRESHOLD) {
+                                        resolve();
+                                    } else {
+                                        setTimeout(checkBuffer, 20); // Poll every 20ms until buffer clears
+                                    }
+                                };
+                                checkBuffer();
+                            });
+                        }
+                        peer.send(serializedMsg);
+                    } catch (e) {
+                        console.error("Failed to send chunk to a peer:", e);
+                    }
+                }
+
+                offset += CHUNK_SIZE;
+                chunkIndex++;
+                const progress = Math.min(100, Math.round((offset / fileSize) * 100));
+                setFileProgress(progress);
+                
+                // Yield thread control back to browser loop momentarily to process networking events
+                await new Promise(r => setTimeout(r, 0)); 
+            }
+        } catch (error) {
+            console.error("File transfer error:", error);
+        } finally {
+            setIsSendingFile(false);
+            setFileProgress(null);
+            setMessages(prev => [...prev, {
+                type: 'file',
+                fileName,
+                fileSize,
+                from: peerId,
+                local: true,
+                complete: true,
+                timestamp: Date.now()
+            }]);
+        }
     }, [peerId]);
 
-    // ---------- Peer data handler ----------
     const handlePeerData = useCallback((data, socketId) => {
         try {
             let decodedString;
@@ -111,12 +136,16 @@ export function useRoom(roomId, peerId) {
                 const entry = fileChunksRef.current.get(key);
                 entry.chunks[msg.chunkIndex] = new Uint8Array(msg.data);
 
-                if (entry.chunks.length === entry.total && entry.chunks.every(c => c !== undefined)) {
+                // Validate all parts arrived intact
+                if (entry.chunks.filter(Boolean).length === entry.total) {
                     const fullBuffer = new Uint8Array(entry.size);
                     let pos = 0;
-                    for (const chunk of entry.chunks) {
-                        fullBuffer.set(chunk, pos);
-                        pos += chunk.length;
+                    for (let i = 0; i < entry.total; i++) {
+                        const chunk = entry.chunks[i];
+                        if (chunk) {
+                            fullBuffer.set(chunk, pos);
+                            pos += chunk.length;
+                        }
                     }
                     const blob = new Blob([fullBuffer]);
                     const url = URL.createObjectURL(blob);
@@ -139,7 +168,6 @@ export function useRoom(roomId, peerId) {
         }
     }, []);
 
-    // ---------- Socket & Peer effects ----------
     useEffect(() => {
         const onUserJoined = ({ peerId: newPeerId, socketId: newSocketId }) => {
             if (newSocketId === socket.id) return;
@@ -205,9 +233,8 @@ export function useRoom(roomId, peerId) {
             Object.values(peersRef.current).forEach(p => p.destroy());
             fileChunksRef.current.clear();
         };
-    }, [handlePeerData]); // handlePeerData is stable due to useCallback
+    }, [handlePeerData]);
 
-    // ---------- Expose UI state & actions ----------
     return {
         messages,
         activeUsers,
